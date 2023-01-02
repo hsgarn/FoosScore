@@ -17,7 +17,7 @@
 #ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR 
 #OTHER DEALINGS IN THE SOFTWARE.  
 
-#v1.0 09/20/2022
+#v2.00 01/01/2023 Compatible with FoosOBSPlus v2.00 and above
 
 import network
 import secretsHP
@@ -27,12 +27,17 @@ import time
 import sys
 import socket
 import select
+import machine
 from machine import Pin
 from machine import Timer
 
 FORMAT = 'utf-8'
 LED = Pin("LED",Pin.OUT)
 isConnected = False
+CONFIGFILE = "config.py"
+REQUIREDCONFIGNAMES = ["PORT","SENSOR1","SENSOR2","SENSOR3","LED1","LED2","DELAY_TIME"]
+REQUIREDCONFIGTESTS = ["PORT","PIN","PIN","PIN","PIN","PIN","TIME"]
+VALIDPINS = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,26,27,28]
 
 def blink(blinks, duration):
         while blinks > 0:
@@ -57,6 +62,8 @@ def sensorInterrupt(pin):
     global isBlocked
     global teamScored
     global sensorPinNbr
+    global delayTime
+    
     id = pinId(pin)
     idx = pins.index(id)
     sensorState = sensorStates[idx]
@@ -77,73 +84,171 @@ def sensorInterrupt(pin):
             sensorPinNbr = id
 
     elif (sensor.value() == offState) and (sensorStates[idx] == 1):
-        blockingTimer = Timer(period = DELAY_TIME, mode = Timer.ONE_SHOT, callback = timerDone)
+        blockingTimer = Timer(period = delayTime, mode = Timer.ONE_SHOT, callback = timerDone)
         sensorStates[idx] = 0
 
     for sensor in sensors:
         sensor.irq(handler=sensorInterrupt)
 
-def sendScore(c,teamAndPin):
+def sendMessage(c, message):
     global isConnected
-    msg = "Team"+teamAndPin+"\r\n"
     try:
-        c.send(msg.encode(FORMAT))
+        displayMessage = message.replace("\r","\\r")
+        displayMessage = displayMessage.replace("\n","\\n")
+        print("Sending: [" + displayMessage + "]")
+        c.send(message.encode(FORMAT))
     except Exception as ex:
         if(type(ex).__name__=="OSError"):
+            print(type(ex).__name__,"exception in [sendMessage] function: ",ex.args)
             print("Socket disconnected.")
         else:
-            print(type(ex).__name__,"exception in [sendScore] function: ",ex.args)
+            print(type(ex).__name__,"exception in [sendMessage] function: ",ex.args)
         print("Closing socket.")
         c.close()
         isConnected = False
 
-host       = config.HOST
+def sendScore(c,teamAndPin):
+    msg = "Team:"+teamAndPin+"\r\n"
+    sendMessage(c,msg)
+
+def readConfigFile():
+    config = ""
+    with open(CONFIGFILE,"r") as file:
+        config = file.readlines()
+    return config
+
+def sendConfigFile():
+    config = readConfigFile()
+    sendMessage(c,"Read:\r\n")
+    for line in config:
+        line = "Line:" + line.rstrip()
+        if line != "Line:":
+            line = line + "\r\n"
+            sendMessage(c,line)
+        
+def writeConfigFile(config,filename):
+    with open(filename,"w") as file:
+        for line in config:
+            file.write(line)
+    print("Config written to " + filename + ".")
+
+def validateConfig(config):
+    print("Validating...")
+    validated = True
+    lines = config.rsplit("\r\n")
+    configNames = REQUIREDCONFIGNAMES.copy()
+    configTests = REQUIREDCONFIGTESTS.copy()
+    for line in lines:
+        if line != "":
+            line = line.replace(" ","")
+            name,value = line.rsplit("=")
+            if name in configNames:
+                pos = configNames.index(name)
+                if pos >= 0:
+                    test = configTests[pos]
+                    del configNames[pos]
+                    del configTests[pos]
+                    if test == "PORT":
+                        if value.isdigit():
+                            value = int(value)
+                            if value < 0 or value > 65535:
+                                validated = False
+                        else:
+                            validated = False
+                    elif test == "PIN":
+                        if value.isdigit():
+                            value = int(value)
+                            if value not in VALIDPINS:
+                                validated = False
+                        else:
+                            validated = False
+                    elif test == "TIME":
+                        if value.isdigit():
+                            value = int(value)
+                            if value < 1 or value > 60000:
+                                validated = False
+                        else:
+                            validated = False
+    if len(configNames) != 0:
+        validated = False
+        print("Missing parameters: ")
+        print(*configNames, sep = ", ")
+    return validated
+
+def parseSave():
+    writeDone = False
+    dateStamp = ""
+    config = ""
+    text = cmd[1].rsplit("\n")
+    for t in text:
+        if t != "":
+            if t[0:3] == "End":
+                print("Got End")
+                if validateConfig(config):
+                    if dateStamp != "":
+                        oldConfig = readConfigFile()
+                        if oldConfig == config:
+                            print("New config same as old config - write aborted.")
+                        else:
+                            writeConfigFile(oldConfig,CONFIGFILE + dateStamp)
+                            print("Old config backed up as " + CONFIGFILE + dateStamp + ".")
+                            print("writing config...")
+                            writeConfigFile(config,CONFIGFILE)
+                    else:
+                        print("No dateStamp found - write aborted.")
+                else:
+                    print("Invalid config - write aborted.")
+            elif t[0:4] == "date":
+                dateStamp = t[7:21]
+            else:
+                config = config + t + "\r\n"
+    
 port       = config.PORT
 SENSOR1    = config.SENSOR1
 SENSOR2    = config.SENSOR2
 SENSOR3    = config.SENSOR3
 LED1       = config.LED1
 LED2       = config.LED2
-DELAY_TIME = config.DELAY_TIME
+delayTime  = config.DELAY_TIME
 
 print("Configuration:")
-print("HOST:    ",host)
 print("PORT:    ",port)
 print("SENSOR1: ",SENSOR1)
 print("SENSOR2: ",SENSOR2)
 print("SENSOR3: ",SENSOR3)
 print("LED1:    ",LED1)
 print("LED2:    ",LED2)
+print("DELAY:   ",delayTime)
 
 if SENSOR1 + SENSOR2 + SENSOR3 < 1:
-    print("Not enough sensors configured in config.py.  Aborting.")
+    print("Not enough sensors configured in " + CONFIGFILE + ".  Aborting.")
     sys.exit()
 if ((SENSOR1 == SENSOR2) or (SENSOR2 == SENSOR3) or (LED1 == LED2)):
-    print("ERROR: Two Pins are the same in config.py.  Aborting.")
+    print("ERROR: Two Pins are the same in " + CONFIGFILE + ".  Aborting.")
     sys.exit()
 if ((SENSOR1 == LED1) or (SENSOR2 == LED1) or (SENSOR3 == LED1)):
-    print("ERROR: Sensor and LED1 have same pin in config.py. Aborting.")
+    print("ERROR: Sensor and LED1 have same pin in " + CONFIGFILE + ".  Aborting.")
     sys.exit()
 if ((SENSOR1 == LED2) or (SENSOR2 == LED2) or (SENSOR3 == LED2)):
-    print("ERROR: Sensor and LED2 have same pin in config.py. Aborting.")
+    print("ERROR: Sensor and LED2 have same pin in " + CONFIGFILE + ".  Aborting.")
     sys.exit()
 
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
 while (wlan.isconnected()==False):
-    print("Establishing wifi connection with: ",secretsHP.SSID)
+    print("Trying wifi connection with: ",secretsHP.SSID)
     wlan.connect(secretsHP.SSID, secretsHP.PASSWORD)
-    blink(10,.25)
-    time.sleep(3)
+    blink(6,.25)
+    time.sleep(2)
     if(wlan.isconnected()==False):
         print("Trying wifi connection with: ",secretsHome.SSID)
         wlan.connect(secretsHome.SSID, secretsHome.PASSWORD)
-        blink(10,.25)
-        time.sleep(3)
+        blink(6,.25)
+        time.sleep(2)
 
-blink(2,.5)
+blink(2,.25)
 host = wlan.ifconfig()[0]
-print("host ip = ",host)
+print("Connected. Host ip = " + host + ".")
 print()
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -156,14 +261,12 @@ except:
     try:
         s.bind((host, port))
     except:
-        print("Could not bind "+host+":"+port)
+        print("Could not bind " + host + ":" + port + ".")
         sys.exit()
-print("Socket bound")
+print("Socket bound.")
 s.listen(1)
 
-blinks=5
-duration=.25
-blink(blinks,duration)
+blink(4,.15)
 
 team1LED = Pin(LED1,Pin.OUT)
 team2LED = Pin(LED2,Pin.OUT)
@@ -202,9 +305,7 @@ def allBlink(blinks, duration):
                 time.sleep(duration)
                 blinks = blinks - 1
 
-blinks=3
-duration=.5
-allBlink(blinks,duration)
+allBlink(3,.3)
 isConnected = False
 
 print("Sensors Active.")
@@ -214,29 +315,51 @@ connectCount = 0
 while True:
     if teamScored[0]:
         teamScored[0] = False
-        print("Team 1 Scored so send to live stream - Pin: " + str(sensorPinNbr))
+        print("Team 1 Scored - Pin: " + str(sensorPinNbr))
         if(isConnected):
             sendScore(c,"1,"+str(sensorPinNbr))
     elif teamScored[1]:
         teamScored[1] = False
-        print("Team 2 Scored so send to live stream - Pin: " + str(sensorPinNbr))
+        print("Team 2 Scored - Pin: " + str(sensorPinNbr))
         if(isConnected):
             sendScore(c,"2,"+str(sensorPinNbr))
     time.sleep(.1)
-
+    if(isConnected):
+        data = False
+        try:
+            data = c.recv(255)
+        except Exception as TimeoutException:
+            pass
+        if data:
+            raw = data.decode(FORMAT)
+            print("Read from socket:", raw)
+            cmd = raw.rsplit(":")
+            print("Command: [" + cmd[0] + "]")
+            if cmd[0]=="reset":
+                print("Resetting...")
+                machine.reset()
+            if cmd[0]=="read":
+                sendConfigFile()
+            if cmd[0]=="save":
+                parseSave()
+       
     try:
         r, w, err = select.select((s,), (), (), .001)
     except select.error:
         s.close()
+        isConnected = False
         print("connection error.  Aborting..")
         sys.exit()
     if r:
         for readable in r:
             c, addr = s.accept()
             connectCount += 1
+            timeoutCount = 0
+            recvCount = 0
             print("Connected to :", addr[0], ':', addr[1])
-            print("Connection number: ",connectCount)
-            blink(3,.25)
+            print("Connection number: ", connectCount)
+            c.settimeout(.01)
+            blink(3,.15)
             isConnected = True
 
 s.close()
